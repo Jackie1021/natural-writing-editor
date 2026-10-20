@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Natural Writing Editor</title>
+<style>
+  :root { --bg:#fafaf7; --fg:#1f2328; --muted:#6b7280; --card:#fff; --line:#e5e7eb; --accent:#2f6f5e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16181b; --fg:#e6e6e6; --muted:#9aa0a6; --card:#1f2226; --line:#33373d; --accent:#6fbfa6; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif; }
+  main { max-width:1200px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  select, input, button, textarea { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  input[type=password] { flex:1; min-width:200px; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:760px) { .grid { grid-template-columns:1fr; } }
+  textarea { width:100%; height:60vh; resize:vertical; line-height:1.7; }
+  label.small { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+  #notes { width:100%; height:auto; min-height:42px; }
+  #status { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Natural Writing Editor</h1>
+  <p class="sub">粘贴文稿 → 选择模式 → 改写。保留原意与你的口吻，让句子自然、清楚、像人写的。API Key 只保存在你自己的浏览器里。</p>
+
+  <div class="bar">
+    <input id="key" type="password" placeholder="Anthropic API Key (sk-ant-...)" autocomplete="off">
+    <select id="model">
+      <option value="claude-opus-5-5">Opus 5.5（质量最好）</option>
+      <option value="claude-sonnet-5-5">Sonnet 5.5（更快更便宜）</option>
+    </select>
+  </div>
+
+  <div class="bar">
+    <select id="mode">
+      <option value="natural">自然化：去掉 AI 腔，读起来像本人写的</option>
+      <option value="polish">润色：修语法和用词，改动最少</option>
+      <option value="academic">学术：正式、清晰、简洁</option>
+      <option value="concise">精简：删冗余，压缩篇幅</option>
+    </select>
+    <select id="lang">
+      <option value="same">输出语言：同原文</option>
+      <option value="English">输出：English</option>
+      <option value="中文">输出：中文</option>
+    </select>
+    <button id="go" class="primary">改写</button>
+    <button id="copy">复制结果</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="bar" style="display:block">
+    <label class="small" for="notes">额外要求（可选），例如「保持第一人称」「英式拼写」「不要改专业术语」</label>
+    <textarea id="notes" rows="1"></textarea>
+  </div>
+
+  <div class="grid">
+    <div><label class="small" for="src">原文</label><textarea id="src" placeholder="在这里粘贴你的文字…"></textarea></div>
+    <div><label class="small" for="out">结果</label><textarea id="out" readonly></textarea></div>
+  </div>
+</main>
+
+<script type="module">
+import Anthropic from "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.131.0/+esm";
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+$("key").value = store.get("nwe_key");
+$("model").value = store.get("nwe_model") || "claude-opus-5-5";
+
+const STYLE = `You are an experienced human editor. Rewrite the user's text so it reads like a thoughtful person wrote it by hand.
+
+Core rules:
+- Keep the author's meaning, facts, claims, citations, numbers and technical terms exactly. Never invent content or references.
+- Keep the author's own voice and level of formality; edit, don't replace.
+- Write the way careful people actually write: vary sentence length naturally, use plain words where they work, connect ideas with logic rather than stock transitions.
+- Avoid typical AI-assistant habits: "delve", "crucial", "pivotal", "in today's fast-paced world", "it is worth noting that", "furthermore/moreover" at every sentence start, tidy triplets, empty summaries, em-dash overuse, over-hedging.
+- Do NOT add deliberate errors, odd word choices, or scrambled syntax. The result must be clean, idiomatic and fluent.
+- Keep paragraph breaks unless a change clearly helps.
+- Output only the revised text. No preamble, no notes.`;
+
+const MODES = {
+  natural: "Task: make the text sound natural and human, removing stiff or formulaic phrasing while keeping the structure largely intact.",
+  polish: "Task: light copy-edit. Fix grammar, spelling, word choice and awkward phrasing. Change as little as possible.",
+  academic: "Task: edit into clear, formal academic prose suitable for a paper or assignment. Precise, concise, no flourish.",
+  concise: "Task: tighten the text. Cut redundancy and filler, aim for roughly 20-30% shorter without losing any substantive point.",
+};
+
+$("go").onclick = async () => {
+  const key = $("key").value.trim();
+  const text = $("src").value.trim();
+  if (!key) return status("请先填 API Key");
+  if (!text) return status("请先粘贴原文");
+  store.set("nwe_key", key);
+  store.set("nwe_model", $("model").value);
+
+  const lang = $("lang").value;
+  const notes = $("notes").value.trim();
+  const system = [STYLE, MODES[$("mode").value],
+    lang === "same" ? "Write in the same language as the input." : `Write the output in ${lang}.`,
+    notes ? `Extra instructions from the author: ${notes}` : ""].filter(Boolean).join("\n\n");
+
+  $("go").disabled = true; $("out").value = ""; status("改写中…");
+  try {
+    const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+    const stream = client.beta.messages.stream({
+      model: $("model").value,
+      max_tokens: 32000,
+      output_config: { effort: "medium" },
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      system,
+      messages: [{ role: "user", content: `<text>\n${text}\n</text>` }],
+    });
+    stream.on("text", (t) => { $("out").value += t; });
+    const msg = await stream.finalMessage();
+    if (msg.stop_reason === "refusal") status("模型拒绝了这段内容");
+    else if (msg.stop_reason === "max_tokens") status("输出过长被截断，请分段处理");
+    else status(`完成 · 输入 ${msg.usage.input_tokens} / 输出 ${msg.usage.output_tokens} tokens`);
+  } catch (e) {
+    status(e instanceof Anthropic.AuthenticationError ? "API Key 无效" :
+           e instanceof Anthropic.RateLimitError ? "请求太频繁，稍后再试" :
+           "出错：" + (e.message || e));
+  } finally { $("go").disabled = false; }
+};
+
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("out").value); status("已复制"); } catch { status("复制失败，请手动选择"); }
+};
+function status(s) { $("status").textContent = s; }
+</script>
+</body>
+</html>
